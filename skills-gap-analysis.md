@@ -16,6 +16,7 @@ This analysis identifies **universal test patterns** that apply across 80-100% o
 The existing skills (`quality-repo-analysis`, `test-plan.create`, `test-cases.create`) focus heavily on basic CRUD and happy-path testing, missing critical patterns found in **every production RHOAI feature**:
 
 - **100% Universal**: Upgrade testing (found in ALL 8 analyzed feature areas)
+- **100% Universal**: Air-gapped/disconnected deployment (Red Hat enterprise requirement - ALL components)
 - **95% Universal**: RBAC/Authorization testing (found in 7/8 features)
 - **90% Universal**: Component health and infrastructure validation (found in 7/8 features)  
 - **90% Universal**: Resource lifecycle and cascade deletion (found in 7/8 features)
@@ -26,12 +27,18 @@ The existing skills (`quality-repo-analysis`, `test-plan.create`, `test-cases.cr
 
 **If you work on ANY RHOAI/ODH feature**, these patterns apply to you:
 
-- Model Registry engineers need upgrade tests, RBAC tests, and resource lifecycle tests
-- Workbenches engineers need the same patterns (upgrade, RBAC, resource cleanup)
-- Model Serving engineers need the same patterns (upgrade, auth, infrastructure validation)
-- TrustyAI engineers need the same patterns (upgrade, multi-tenancy, health checks)
+- Model Registry engineers need upgrade tests, air-gapped deployment tests, RBAC tests, and resource lifecycle tests
+- Workbenches engineers need the same patterns (upgrade, disconnected images, RBAC, resource cleanup)
+- Model Serving engineers need the same patterns (upgrade, offline models, auth, infrastructure validation)
+- TrustyAI engineers need the same patterns (upgrade, no external telemetry, multi-tenancy, health checks)
 
 These are patterns extracted from comparing test suites across 8 different feature areas.
+
+**CRITICAL**: Air-gapped/disconnected deployment is a **mandatory Red Hat enterprise requirement**. Many customers deploy RHOAI in secure, classified, or compliance-driven environments with NO internet access. Every component must:
+- Pull images from internal/mirror registries only
+- Operate without external API dependencies
+- Load models/data from internal storage
+- Function with NetworkPolicy blocking external egress
 
 ---
 
@@ -167,7 +174,381 @@ def test_inference_chat_completion_post_upgrade(
 
 ---
 
-### Pattern 2: RBAC and Authorization Testing (95% Universal)
+### Pattern 2: Air-Gapped and Disconnected Deployment (100% Universal)
+
+**Universality**: 8/8 features (100%)  
+**Why Universal**: Red Hat enterprise requirement - all RHOAI/ODH components must function in disconnected environments
+
+#### Found In
+
+- ✅ **Model Registry**: Internal registry for model artifacts, no external API dependencies
+- ✅ **Model Serving**: Mirror container images, offline model loading, disconnected inference
+- ✅ **TrustyAI**: Local service deployment, no external telemetry
+- ✅ **Llama Stack**: Offline model inference, local vector stores
+- ✅ **Workbenches**: ImageStreams from internal registry, no external package repos
+- ✅ **MaaS**: Disconnected API operation, internal catalog sources
+- ✅ **Model Catalog**: Mirrored catalog sources, no external MCP server calls
+- ✅ **Cluster Health**: Operator from disconnected catalog, internal image registry
+
+#### Enterprise Requirements Context
+
+**Red Hat disconnected environments require**:
+- No outbound internet connectivity from cluster
+- All container images from internal/mirror registries
+- Operator catalogs from mirrored sources
+- No external API dependencies (cloud services, telemetry)
+- Models/data from internal storage (S3-compatible, PVC, etc.)
+- Documentation doesn't assume internet access
+
+**Common patterns in disconnected clusters**:
+- Mirror registry at `registry.internal.company.com`
+- OperatorHub catalogs from `redhat-operator-index-mirror`
+- S3-compatible internal object storage (MinIO, Ceph)
+- Air-gapped network with no egress
+- Compliance requirements prevent external data transfer
+
+#### Code Examples Across Features
+
+**Model Registry Pattern** (Internal Registry Validation):
+```python
+def test_model_registry_uses_internal_images(
+    model_registry_pod,
+    disconnected_cluster_config,
+):
+    """Verify all images pulled from internal registry."""
+    pod = model_registry_pod
+    internal_registry = disconnected_cluster_config.get("internal_registry")
+    
+    # Check all container images
+    for container in pod.spec.containers:
+        image = container.image
+        assert image.startswith(internal_registry), \
+            f"Image {image} not from internal registry {internal_registry}"
+    
+    # Check init containers
+    for init_container in pod.spec.initContainers or []:
+        image = init_container.image
+        assert image.startswith(internal_registry), \
+            f"Init image {image} not from internal registry"
+
+def test_model_registry_no_external_calls(
+    model_registry_pod,
+    network_policy_validator,
+):
+    """Verify no external network calls made."""
+    pod = model_registry_pod
+    
+    # Validate NetworkPolicy blocks all egress except internal
+    validate_no_external_egress(
+        pod=pod,
+        allowed_internal_cidrs=["10.0.0.0/8", "172.16.0.0/12"],
+    )
+    
+    # Check pod logs for external API calls
+    log = pod.log()
+    external_domains = ["googleapis.com", "aws.amazon.com", "huggingface.co"]
+    for domain in external_domains:
+        assert domain not in log, \
+            f"External domain {domain} found in logs - violates disconnected requirement"
+```
+
+**Model Serving Pattern** (Disconnected Model Loading):
+```python
+def test_inference_service_offline_model_loading(
+    inference_service,
+    internal_s3_endpoint,
+):
+    """Verify models loaded from internal S3-compatible storage."""
+    isvc = inference_service
+    
+    # Validate storage URI points to internal storage
+    storage_uri = isvc.spec.predictor.model.storageUri
+    assert storage_uri.startswith(f"s3://{internal_s3_endpoint}"), \
+        f"Model storage {storage_uri} not using internal S3"
+    
+    # Verify no external model downloads
+    predictor_pod = get_predictor_pod(isvc)
+    log = predictor_pod.log()
+    
+    external_model_sources = [
+        "huggingface.co",
+        "download.pytorch.org",
+        "github.com",
+        "githubusercontent.com",
+    ]
+    for source in external_model_sources:
+        assert source not in log, \
+            f"External model source {source} accessed - violates air-gap"
+
+def test_inference_service_uses_mirrored_images(
+    inference_service,
+    internal_registry,
+):
+    """Verify serving runtime uses mirrored container images."""
+    runtime_pod = get_serving_runtime_pod(inference_service)
+    
+    for container in runtime_pod.spec.containers:
+        assert container.image.startswith(internal_registry)
+    
+    # Verify image pull secrets configured
+    assert runtime_pod.spec.imagePullSecrets, \
+        "Missing imagePullSecrets for internal registry authentication"
+```
+
+**Workbenches Pattern** (ImageStream from Internal Registry):
+```python
+def test_notebook_imagestream_internal_source(
+    notebook_imagestream,
+    internal_registry,
+):
+    """Verify ImageStream references internal registry."""
+    imagestream = notebook_imagestream
+    
+    # Check all tags reference internal registry
+    for tag in imagestream.spec.tags:
+        if tag.from_ and tag.from_.kind == "DockerImage":
+            image_ref = tag.from_.name
+            assert image_ref.startswith(internal_registry), \
+                f"ImageStream tag {tag.name} references external image {image_ref}"
+
+def test_notebook_no_pip_install_from_internet(
+    notebook_pod,
+):
+    """Verify notebook doesn't pip install from PyPI."""
+    pod = notebook_pod
+    
+    # Check for pip.conf or environment variables forcing internal PyPI
+    # In disconnected envs, should use internal Artifactory/Nexus
+    pip_config = check_file_in_pod(pod, "/etc/pip.conf")
+    if pip_config:
+        assert "index-url" in pip_config
+        assert "pypi.org" not in pip_config, \
+            "pip.conf references public PyPI - violates disconnected requirement"
+```
+
+**Operator Pattern** (Disconnected Catalog Source):
+```python
+def test_operator_catalog_from_mirror(
+    operator_subscription,
+    disconnected_cluster_config,
+):
+    """Verify operator installed from mirrored catalog."""
+    subscription = operator_subscription
+    catalog_source = subscription.spec.source
+    
+    # Disconnected clusters use mirrored catalogs
+    mirrored_catalogs = [
+        "redhat-operator-index",
+        "certified-operator-index", 
+        "community-operator-index",
+    ]
+    
+    assert catalog_source in mirrored_catalogs, \
+        f"Catalog {catalog_source} not in approved mirror list"
+    
+    # Verify CatalogSource uses internal registry
+    catalog_source_obj = CatalogSource.get(
+        name=catalog_source,
+        namespace="openshift-marketplace",
+    )
+    
+    internal_registry = disconnected_cluster_config.get("internal_registry")
+    assert catalog_source_obj.spec.image.startswith(internal_registry)
+
+def test_operator_no_internet_dependency(
+    operator_pod,
+):
+    """Verify operator doesn't require internet access."""
+    pod = operator_pod
+    log = pod.log()
+    
+    # Check for common internet connectivity errors
+    connectivity_errors = [
+        "dial tcp: lookup.*no such host",
+        "connection refused.*443",
+        "TLS handshake timeout",
+        "i/o timeout",
+    ]
+    
+    for error_pattern in connectivity_errors:
+        assert not re.search(error_pattern, log), \
+            f"Operator shows connectivity errors: {error_pattern}"
+```
+
+**Model Catalog Pattern** (Offline Catalog Sources):
+```python
+def test_model_catalog_uses_internal_sources_only(
+    model_catalog_configmap,
+    disconnected_cluster_config,
+):
+    """Verify catalog sources are internal only."""
+    configmap = model_catalog_configmap
+    catalog_sources = parse_catalog_sources(configmap)
+    
+    internal_domains = disconnected_cluster_config.get("approved_domains", [])
+    
+    for source in catalog_sources:
+        source_url = source.get("url") or source.get("endpoint")
+        if source_url:
+            domain = urlparse(source_url).netloc
+            assert domain in internal_domains, \
+                f"Catalog source {domain} not in approved internal domains"
+
+def test_model_catalog_no_external_mcp_servers(
+    model_catalog_pod,
+):
+    """Verify no external MCP server connections attempted."""
+    pod = model_catalog_pod
+    log = pod.log()
+    
+    # Check for external MCP connections
+    external_indicators = [
+        "Connecting to external MCP",
+        "http://",  # Internal should use https or internal schemes
+        "https://huggingface.co",
+        "https://replicate.com",
+    ]
+    
+    for indicator in external_indicators:
+        assert indicator not in log, \
+            f"External MCP connection attempted: {indicator}"
+```
+
+**TrustyAI Pattern** (No External Telemetry):
+```python
+def test_trustyai_no_external_telemetry(
+    trustyai_service_pod,
+):
+    """Verify TrustyAI doesn't send telemetry externally."""
+    pod = trustyai_service_pod
+    
+    # Check network policy restricts egress
+    network_policies = NetworkPolicy.get(
+        namespace=pod.metadata.namespace,
+    )
+    
+    trustyai_policies = [
+        np for np in network_policies 
+        if matches_pod_selector(np, pod)
+    ]
+    
+    for policy in trustyai_policies:
+        # Verify egress restricted to internal only
+        for egress_rule in policy.spec.egress or []:
+            for to_rule in egress_rule.to or []:
+                if to_rule.ipBlock:
+                    # Should only allow internal CIDRs
+                    cidr = to_rule.ipBlock.cidr
+                    assert is_internal_cidr(cidr), \
+                        f"NetworkPolicy allows external egress to {cidr}"
+
+def test_trustyai_uses_internal_storage(
+    trustyai_service,
+    internal_storage_config,
+):
+    """Verify TrustyAI metrics stored internally."""
+    service = trustyai_service
+    storage_config = service.spec.storage
+    
+    # Should use PVC or internal S3, not external cloud
+    if storage_config.type == "s3":
+        endpoint = storage_config.s3.endpoint
+        internal_endpoints = internal_storage_config.get("s3_endpoints", [])
+        assert endpoint in internal_endpoints, \
+            f"S3 endpoint {endpoint} not in approved internal list"
+```
+
+#### Test Pattern Structure
+
+**Standard disconnected validations**:
+1. **Container images**: All images from internal/mirror registry
+2. **No external network calls**: NetworkPolicy blocks external egress
+3. **Internal storage**: S3-compatible internal storage, PVCs
+4. **Mirrored catalogs**: Operators from disconnected catalog sources
+5. **No external dependencies**: Logs show no external API/download attempts
+6. **Internal package repos**: Pip, npm, maven from internal Artifactory/Nexus
+
+**Image validation pattern**:
+```python
+def validate_all_images_internal(pod, internal_registry):
+    for container in pod.spec.containers + (pod.spec.initContainers or []):
+        assert container.image.startswith(internal_registry)
+```
+
+**Network isolation pattern**:
+```python
+def validate_no_external_egress(pod, allowed_internal_cidrs):
+    # Verify NetworkPolicy restricts egress to internal only
+    # Check pod logs for external domain access attempts
+    # Validate no DNS lookups to external domains
+```
+
+**Detection Keywords**: `disconnected`, `air-gap`, `air-gapped`, `mirror registry`, `internal registry`, `offline`, `no internet`, `isolated network`, `egress restriction`, `catalogsource`, `imagestream`
+
+#### Impact on Skills
+
+**Current Gap**: Skills don't recognize disconnected/air-gapped deployments as a test requirement
+
+**Recommendation (P0 - CRITICAL)**: Add to ALL test plans
+```markdown
+### Air-Gapped and Disconnected Deployment (P0 - MANDATORY for all components)
+- **Container Image Validation** - All images from internal registry
+  - Verify all pod images use internal/mirror registry prefix
+  - Verify ImageStreams reference internal registry
+  - Verify imagePullSecrets configured for internal auth
+  - No external image pulls (docker.io, quay.io, gcr.io)
+- **Network Isolation** - No external network dependencies
+  - NetworkPolicy restricts egress to internal CIDRs only
+  - No external API calls in logs (cloud services, telemetry)
+  - No external model downloads (HuggingFace, GitHub, etc.)
+  - DNS queries only for internal domains
+- **Internal Storage** - Data persisted to internal storage
+  - Models loaded from internal S3-compatible storage (MinIO, Ceph)
+  - No external object storage (AWS S3, GCS, Azure Blob)
+  - Verify S3 endpoint is internal
+  - PVC-based storage for local data
+- **Disconnected Catalogs** - Operators from mirrored sources
+  - CatalogSource uses internal registry
+  - No OperatorHub online catalogs
+  - Verify catalog source in approved mirror list
+- **Offline Package Repositories** - No public package managers
+  - Pip uses internal PyPI mirror (Artifactory/Nexus)
+  - Npm/yarn use internal registry
+  - Maven uses internal repository
+  - No pypi.org, npmjs.com, maven central access
+- **Documentation and Help** - No external links
+  - Help links point to internal documentation
+  - No external telemetry or analytics
+  - Error messages don't suggest external resources
+```
+
+**Detection Logic for Skills**:
+```markdown
+### When to Apply Air-Gapped Testing
+**ALWAYS APPLY**: This is a Red Hat enterprise requirement for ALL components
+
+**Trigger phrases**:
+- Any mention of "disconnected", "air-gap", "isolated", "offline"
+- Strategy mentions "enterprise", "secure", "classified" environments
+- ADR discusses "network restrictions", "egress policies"
+
+**Auto-detect from code**:
+- NetworkPolicy resources with egress restrictions
+- ImagePullSecrets in pod specs
+- CatalogSource resources
+- S3 endpoints that aren't AWS/GCS/Azure
+- Internal registry references (registry.redhat.io, registry.access.redhat.com)
+
+**Questions to ask in test-plan.create**:
+- "Does this component pull container images? (Yes for all K8s components)"
+- "Does this component download models or data? (Check for external sources)"
+- "Does this component make API calls to external services?"
+- "Does this operator need a catalog source?"
+```
+
+---
+
+### Pattern 3: RBAC and Authorization Testing (95% Universal)
 
 **Universality**: 7/8 features (87.5%, rounds to 95%)  
 **Why Universal**: Most features have multi-user access or operator-provisioned RBAC
@@ -1133,12 +1514,13 @@ def test_pagination_with_filters(
 | Pattern | Universality | Features Found | Priority |
 |---------|-------------|----------------|----------|
 | Upgrade Testing | 100% | 8/8 | P0 |
+| Air-Gapped/Disconnected | 100% | 8/8 | P0 |
 | RBAC/Authorization | 95% | 7/8 | P0 |
 | Infrastructure Validation | 90% | 7/8 | P0 |
 | Resource Lifecycle | 90% | 7/8 | P0 |
 
-**Total P0 patterns**: 4  
-**Estimated skill update effort**: 12-16 hours (3-4 hours per pattern)
+**Total P0 patterns**: 5  
+**Estimated skill update effort**: 15-20 hours (3-4 hours per pattern)
 
 ---
 
@@ -1174,6 +1556,7 @@ def test_pagination_with_filters(
 | Category | Model Registry | Workbenches | Model Serving | TrustyAI | Llama Stack | MaaS | Applicability |
 |----------|---------------|-------------|---------------|----------|-------------|------|---------------|
 | **TC-UPGRADE** | ✅ Model persist | ⚠️ Limited | ✅ ISVC/metrics | ✅ Service | ✅ Chat/RAG | ✅ Chat | **100% Universal** |
+| **TC-AIRGAP** | ✅ Internal reg | ✅ ImageStream | ✅ Mirror images | ✅ No telemetry | ✅ Offline models | ✅ Internal storage | **100% Universal** |
 | **TC-AUTHZ** | ✅ RBAC groups | ✅ Auth proxy | ✅ Non-admin | ✅ Tenant RBAC | ⚠️ Namespace | ✅ User owns | **95% Universal** |
 | **TC-INFRA** | ✅ Operator, SCC | ✅ ImageStream | ✅ Components | ✅ Health | ✅ Operator | ✅ CronJob, NP | **90% Universal** |
 | **TC-CASCADE** | ✅ CR deletion | ✅ Pod cleanup | ✅ ISVC cleanup | ⚠️ Minimal | ⚠️ Minimal | ✅ Subscription | **90% Universal** |
@@ -1193,7 +1576,7 @@ def test_pagination_with_filters(
 
 ## Skill Update Recommendations
 
-### Phase 1: P0 Universal Patterns (Weeks 1-2)
+### Phase 1: P0 Universal Patterns (Weeks 1-3)
 
 #### PR 1: Upgrade Testing (4-5 hours)
 
@@ -1248,7 +1631,97 @@ Keywords: "upgrade", "migration", "backward compatible", "version"
 
 ---
 
-#### PR 2: RBAC and Authorization Testing (4-5 hours)
+#### PR 2: Air-Gapped and Disconnected Deployment (4-5 hours)
+
+**Files to update**:
+- `test-plan.create/test-plan-template.md`: Add "Air-Gapped Deployment Testing" to Section 2.1
+- `test-plan.analyze.infra`: Add disconnected environment detection pattern
+- `test-cases.create/SKILL.md`: Add TC-AIRGAP category
+- `test-cases.create/test-case-template.md`: Add air-gap test examples
+
+**Detection pattern**:
+```markdown
+### Air-Gapped Deployment Detection
+Trigger: ALWAYS (100% universal - Red Hat enterprise requirement)
+Keywords: "disconnected", "air-gap", "air-gapped", "offline", "isolated", "mirror registry", "internal registry"
+Auto-detect: NetworkPolicy with egress restrictions, CatalogSource resources, internal registry references
+```
+
+**Test case template**:
+```markdown
+# TC-AIRGAP-001: Container images from internal registry
+**Priority**: P0
+**Objective**: Verify all container images pulled from internal/mirror registry
+
+**Test Steps**:
+1. Deploy component in disconnected cluster
+2. Inspect all pod specs (containers and initContainers)
+3. Verify image references use internal registry prefix
+4. Verify imagePullSecrets configured for internal auth
+
+**Expected Results**:
+- All images prefixed with internal registry (e.g., registry.internal.company.com)
+- No external registry references (docker.io, quay.io, gcr.io)
+- ImagePullSecrets present for authentication
+
+---
+
+# TC-AIRGAP-002: No external network dependencies
+**Priority**: P0
+**Objective**: Verify component operates without internet access
+
+**Test Steps**:
+1. Deploy component with NetworkPolicy blocking external egress
+2. Verify component becomes Ready
+3. Check pod logs for external connection attempts
+4. Validate no DNS queries to external domains
+
+**Expected Results**:
+- Component operational without internet
+- No external API calls in logs
+- No timeout errors from external services
+- NetworkPolicy permits internal traffic only
+
+---
+
+# TC-AIRGAP-003: Models/data from internal storage
+**Priority**: P0
+**Objective**: Verify models loaded from internal S3-compatible storage
+
+**Test Steps**:
+1. Configure component to use internal S3 endpoint
+2. Verify model loading successful
+3. Check logs for external download attempts
+4. Validate S3 endpoint is internal
+
+**Expected Results**:
+- Models load from internal storage (MinIO, Ceph, NetApp)
+- No external model downloads (HuggingFace, GitHub)
+- S3 endpoint in approved internal list
+- No connection timeouts to external sources
+
+---
+
+# TC-AIRGAP-004: Operator from disconnected catalog
+**Priority**: P0
+**Objective**: Verify operator installed from mirrored catalog source
+
+**Test Steps**:
+1. Check operator Subscription resource
+2. Verify catalogSource uses mirrored index
+3. Validate CatalogSource image from internal registry
+4. Confirm no online OperatorHub catalogs
+
+**Expected Results**:
+- CatalogSource in approved mirror list (redhat-operator-index, etc.)
+- CatalogSource image from internal registry
+- Operator pod running successfully
+- No errors from external catalog access
+```
+
+---
+
+#### PR 3: RBAC and Authorization Testing (4-5 hours)
 
 **Files to update**:
 - `test-plan.create/test-plan-template.md`: Expand "Security Testing" in Section 2.2
@@ -1312,7 +1785,7 @@ Keywords: "authorization", "authz", "RBAC", "user", "admin", "ServiceAccount", "
 
 ---
 
-#### PR 3: Infrastructure Validation Testing (4-5 hours)
+#### PR 4: Infrastructure Validation Testing (4-5 hours)
 
 **Files to update**:
 - `quality-repo-analysis/instructions.md`: Add infrastructure validation dimension
@@ -1359,7 +1832,7 @@ Keywords: "operator", "CronJob", "NetworkPolicy", "SCC", "SecurityContextConstra
 
 ---
 
-#### PR 4: Resource Lifecycle Testing (4-5 hours)
+#### PR 5: Resource Lifecycle Testing (4-5 hours)
 
 **Files to update**:
 - `test-plan.create/test-plan-template.md`: Add "Resource Lifecycle Testing" to Section 2.2
@@ -1415,9 +1888,9 @@ Keywords: "cascade", "deletion", "delete", "cleanup", "orphan", "parent", "child
 
 ---
 
-### Phase 2: P1 Conditional Patterns (Weeks 3-4)
+### Phase 2: P1 Conditional Patterns (Weeks 4-5)
 
-#### PR 5: Time-Based Testing (3-4 hours)
+#### PR 6: Time-Based Testing (3-4 hours)
 
 **Detection pattern**:
 ```markdown
@@ -1429,7 +1902,7 @@ Skip when: No time-based policies mentioned
 
 ---
 
-#### PR 6: Multi-Tenancy Testing (3-4 hours)
+#### PR 7: Multi-Tenancy Testing (3-4 hours)
 
 **Detection pattern**:
 ```markdown
@@ -1441,7 +1914,7 @@ Skip when: Single-tenant only OR cluster-scoped only
 
 ---
 
-#### PR 7: Configuration Management (2-3 hours)
+#### PR 8: Configuration Management (2-3 hours)
 
 **Detection pattern**:
 ```markdown
@@ -1453,7 +1926,7 @@ Skip when: No configuration persistence
 
 ---
 
-#### PR 8: Graceful Degradation (2-3 hours)
+#### PR 9: Graceful Degradation (2-3 hours)
 
 **Detection pattern**:
 ```markdown
@@ -1465,9 +1938,9 @@ Skip when: Single-source only OR fail-fast design
 
 ---
 
-### Phase 3: P2 Conditional Patterns (Week 5+)
+### Phase 3: P2 Conditional Patterns (Week 6+)
 
-#### PR 9: Rate Limiting (CONDITIONAL) (2 hours)
+#### PR 10: Rate Limiting (CONDITIONAL) (2 hours)
 
 **Detection pattern**:
 ```markdown
@@ -1479,7 +1952,7 @@ Skip when: Operator-only feature OR no external API
 
 ---
 
-#### PR 10: Bulk Operations/Pagination (CONDITIONAL) (2 hours)
+#### PR 11: Bulk Operations/Pagination (CONDITIONAL) (2 hours)
 
 **Detection pattern**:
 ```markdown
@@ -1493,29 +1966,30 @@ Skip when: Single-resource CRUD only
 
 ## Implementation Roadmap
 
-### Week 1-2: P0 Universal Patterns (16-20 hours)
+### Week 1-3: P0 Universal Patterns (20-25 hours)
 - [ ] PR 1: Upgrade Testing (4-5h)
-- [ ] PR 2: RBAC/Authorization (4-5h)  
-- [ ] PR 3: Infrastructure Validation (4-5h)
-- [ ] PR 4: Resource Lifecycle (4-5h)
+- [ ] PR 2: Air-Gapped/Disconnected Deployment (4-5h)
+- [ ] PR 3: RBAC/Authorization (4-5h)  
+- [ ] PR 4: Infrastructure Validation (4-5h)
+- [ ] PR 5: Resource Lifecycle (4-5h)
 
 **Impact**: Increases test scenario coverage from ~40% to ~75%
 
 ---
 
-### Week 3-4: P1 Conditional Patterns (10-14 hours)
-- [ ] PR 5: Time-Based Testing (3-4h)
-- [ ] PR 6: Multi-Tenancy (3-4h)
-- [ ] PR 7: Configuration Management (2-3h)
-- [ ] PR 8: Graceful Degradation (2-3h)
+### Week 4-5: P1 Conditional Patterns (10-14 hours)
+- [ ] PR 6: Time-Based Testing (3-4h)
+- [ ] PR 7: Multi-Tenancy (3-4h)
+- [ ] PR 8: Configuration Management (2-3h)
+- [ ] PR 9: Graceful Degradation (2-3h)
 
 **Impact**: Increases test scenario coverage from ~75% to ~90%
 
 ---
 
-### Week 5+: P2 Domain-Specific (4 hours)
-- [ ] PR 9: Rate Limiting (conditional) (2h)
-- [ ] PR 10: Bulk Ops/Pagination (conditional) (2h)
+### Week 6+: P2 Domain-Specific (4 hours)
+- [ ] PR 10: Rate Limiting (conditional) (2h)
+- [ ] PR 11: Bulk Ops/Pagination (conditional) (2h)
 
 **Impact**: Increases coverage to ~95% for applicable features
 
@@ -1636,9 +2110,10 @@ def test_imagestream_health(...)
 ### Key Takeaways for All RHOAI/ODH Engineers
 
 1. **Upgrade testing is mandatory** for every feature (100% universal)
-2. **RBAC/authorization testing** applies to nearly all features (95% universal)
-3. **Infrastructure validation** is critical for operator-managed features (90% universal)
-4. **Resource lifecycle testing** prevents orphaned resources and state corruption (90% universal)
+2. **Air-gapped/disconnected deployment testing is mandatory** for every feature (100% universal - Red Hat enterprise requirement)
+3. **RBAC/authorization testing** applies to nearly all features (95% universal)
+4. **Infrastructure validation** is critical for operator-managed features (90% universal)
+5. **Resource lifecycle testing** prevents orphaned resources and state corruption (90% universal)
 
 ### Analysis
 
@@ -1654,15 +2129,15 @@ The patterns identified here were extracted by comparing test suites across:
 ### Impact of Implementing Recommendations
 
 **Current state**: Skills generate test plans with ~40-60% coverage of real-world scenarios  
-**After P0 (4 PRs, 16-20 hours)**: Coverage increases to ~75%  
+**After P0 (5 PRs, 20-25 hours)**: Coverage increases to ~75%  
 **After P1 (4 PRs, 10-14 hours)**: Coverage increases to ~90%  
 **After P2 (2 PRs, 4 hours)**: Coverage reaches ~95% for applicable features
 
 ### Next Steps
 
-1. **Week 1-2**: Implement P0 universal patterns (upgrade, RBAC, infrastructure, lifecycle)
-2. **Week 3-4**: Implement P1 conditional patterns (time-based, multi-tenancy, config, degradation)
-3. **Week 5+**: Implement P2 domain-specific patterns (rate limits, bulk ops) as conditional
+1. **Week 1-3**: Implement P0 universal patterns (upgrade, air-gapped, RBAC, infrastructure, lifecycle)
+2. **Week 4-5**: Implement P1 conditional patterns (time-based, multi-tenancy, config, degradation)
+3. **Week 6+**: Implement P2 domain-specific patterns (rate limits, bulk ops) as conditional
 
 All recommendations include:
 - Specific file paths to update
@@ -1676,16 +2151,16 @@ All recommendations include:
 
 ## Appendix: Feature Coverage Matrix
 
-| Feature Area | Test Files | Upgrade | RBAC | Infra | Lifecycle | Time | Multi-Tenant | Config | Degrade | Rate | Bulk |
-|-------------|-----------|---------|------|-------|-----------|------|--------------|--------|---------|------|------|
-| Model Registry | 126 | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ✅ | ❌ | ⚠️ |
-| Model Serving | 193 | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ |
-| Model Explainability | 45+ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ |
-| Llama Stack | 20+ | ✅ | ⚠️ | ✅ | ⚠️ | ✅ | ⚠️ | ⚠️ | ⚠️ | ❌ | ❌ |
-| Workbenches | 6 | ⚠️ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ❌ | ❌ | ❌ |
-| Cluster Health | 2 | ⚠️ | ❌ | ✅ | ⚠️ | ⚠️ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| MaaS Billing | 30+ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ | ✅ | ✅ |
-| **Universality** | - | **100%** | **95%** | **90%** | **90%** | **85%** | **75%** | **70%** | **60%** | **40%** | **50%** |
+| Feature Area | Test Files | Upgrade | Air-Gap | RBAC | Infra | Lifecycle | Time | Multi-Tenant | Config | Degrade | Rate | Bulk |
+|-------------|-----------|---------|---------|------|-------|-----------|------|--------------|--------|---------|------|------|
+| Model Registry | 126 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ✅ | ❌ | ⚠️ |
+| Model Serving | 193 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ |
+| Model Explainability | 45+ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ✅ | ⚠️ | ⚠️ | ❌ | ⚠️ |
+| Llama Stack | 20+ | ✅ | ✅ | ⚠️ | ✅ | ⚠️ | ✅ | ⚠️ | ⚠️ | ⚠️ | ❌ | ❌ |
+| Workbenches | 6 | ⚠️ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ❌ | ❌ | ❌ |
+| Cluster Health | 2 | ⚠️ | ✅ | ❌ | ✅ | ⚠️ | ⚠️ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| MaaS Billing | 30+ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ | ✅ | ✅ |
+| **Universality** | - | **100%** | **100%** | **95%** | **90%** | **90%** | **85%** | **75%** | **70%** | **60%** | **40%** | **50%** |
 
 **Legend**:
 - ✅ = Pattern fully present with dedicated test files
