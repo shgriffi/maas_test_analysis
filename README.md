@@ -9,6 +9,7 @@ This repository provides a complete testing strategy for the MaaS GA release, in
 - Gap analysis between test plans and repository implementations
 - Test coverage assessment and improvement recommendations
 - Mapping of test cases to specific code repositories
+- **Universal test patterns** analysis across RHOAI/ODH features (400+ test files analyzed)
 
 ## Quick Start Guide
 
@@ -26,6 +27,11 @@ This repository provides a complete testing strategy for the MaaS GA release, in
 1. Start with **[maas-test-coverage-analysis-2026-04-07.md](maas-test-coverage-analysis-2026-04-07.md)** for executive summary
 2. Review **[maas-test-improvement-recommendations-2026-04-07.md](maas-test-improvement-recommendations-2026-04-07.md)** for prioritized recommendations
 
+### For Skill/Tool Developers
+1. Review **[skills-gap-analysis.md](skills-gap-analysis.md)** for universal test patterns across RHOAI/ODH features
+2. Use pattern detection keywords to identify which patterns apply to your feature
+3. Follow the implementation roadmap to enhance test generation skills
+
 ## Document Guide
 
 ### Test Plans and Strategy
@@ -41,12 +47,69 @@ This repository provides a complete testing strategy for the MaaS GA release, in
 | **[IMPLEMENTATION_DELTA_AND_GAPS.md](IMPLEMENTATION_DELTA_AND_GAPS.md)** | Comparison of what's planned vs. what's implemented in repositories |
 | **[TEST_PLAN_VS_REPOSITORY_COMPREHENSIVE_GAP_ANALYSIS.md](TEST_PLAN_VS_REPOSITORY_COMPREHENSIVE_GAP_ANALYSIS.md)** | Detailed gap analysis with implementation status per repository |
 | **[maas-test-coverage-analysis-2026-04-07.md](maas-test-coverage-analysis-2026-04-07.md)** | Analysis of current test coverage across all MaaS repositories |
+| **[skills-gap-analysis.md](skills-gap-analysis.md)** | Universal test patterns analysis across 400+ test files from 8 RHOAI/ODH features |
 
 ### Implementation Guidance
 | Document | Purpose |
 |----------|---------|
 | **[TEST_CASE_TO_REPOSITORY_MAPPING.md](TEST_CASE_TO_REPOSITORY_MAPPING.md)** | Maps each test case to the specific repository where it should be implemented |
 | **[maas-test-improvement-recommendations-2026-04-07.md](maas-test-improvement-recommendations-2026-04-07.md)** | Prioritized recommendations for test improvements and gap remediation |
+
+## Understanding the Skills Gap Analysis
+
+The **[skills-gap-analysis.md](skills-gap-analysis.md)** document provides a cross-feature perspective on test patterns that apply universally across RHOAI/OpenDataHub, not just MaaS. This analysis is useful for:
+
+### What It Contains
+
+- **11 Universal Test Patterns** identified across 400+ test files from 8 feature areas
+- **Universality Ratings** showing how widely each pattern applies (100% = all features, 40% = domain-specific)
+- **Code Examples** from multiple features demonstrating each pattern
+- **Detection Keywords** to identify when patterns apply to your feature
+- **Implementation Roadmap** with effort estimates and prioritization
+
+### How to Use It
+
+**For Test Engineers:**
+1. **Find your pattern coverage** — Compare your feature's tests against the 11 patterns
+2. **Check universality** — Patterns rated 80%+ apply to almost all features
+3. **Follow examples** — Use code samples from similar features as templates
+
+**For Skill/Tool Developers:**
+1. **Identify missing patterns** — Compare skill-generated test plans to the 11 universal patterns
+2. **Use detection rules** — Keywords and triggers tell you when to apply each pattern
+3. **Follow the roadmap** — Implement P0 patterns first (upgrade, RBAC, infrastructure, lifecycle)
+
+**Key Patterns to Know:**
+- **Upgrade Testing (100% universal)** — Pre/post-upgrade validation applies to ALL features
+- **RBAC/Authorization (95% universal)** — User ownership and cross-user denial tests
+- **Infrastructure Validation (90% universal)** — Operator health, K8s resource validation
+- **Resource Lifecycle (90% universal)** — Cascade deletion and cleanup testing
+
+### Pattern Priority Levels
+
+- **P0 (Must Implement)** — 4 patterns with 80-100% universality → ~75% coverage improvement
+- **P1 (Should Implement)** — 4 patterns with 60-80% universality → ~90% coverage improvement
+- **P2 (Conditional)** — 3 patterns with 40-60% applicability → Domain-specific only
+
+### Reading the Analysis
+
+Each pattern includes:
+- **Universality percentage** — How many features use this pattern
+- **"Found In" list** — Specific features where pattern appears
+- **Code examples** — Real test code from 3-4 different features
+- **Detection keywords** — Terms that signal this pattern is needed
+- **Test structure** — Common test scenarios and validation steps
+- **Impact on skills** — What's missing and how to fix it
+
+### When to Apply Patterns
+
+The analysis includes detection rules for each pattern. For example:
+
+**Upgrade Testing**: Apply ALWAYS (100% universal)  
+**RBAC Testing**: Apply when feature has multi-user access OR operator-provisioned resources  
+**Rate Limiting**: Apply ONLY when feature has public API AND quota/billing  
+
+This prevents over-application of domain-specific patterns to features where they don't belong.
 
 ## Feature Coverage
 
